@@ -271,14 +271,20 @@ class SolidityAnalyzer:
             stripped = line.strip()
             if stripped.startswith('//') or stripped.startswith('/*') or stripped.startswith('*'):
                 return False
-            # Check if we're inside a comment block by looking at context
-            context_text = '\n'.join(context_before)
-            # Count opening and closing comment delimiters
-            open_comments = context_text.count('/*')
-            close_comments = context_text.count('*/')
+            # Check if we're inside a comment block by looking at all previous context
+            all_before = '\n'.join(context_before)
+            # Count opening and closing comment delimiters in all context before this line
+            open_comments = all_before.count('/*')
+            close_comments = all_before.count('*/')
             if open_comments > close_comments:
-                # We're inside an unclosed comment block
+                # We're inside an unclosed comment block - skip this line
                 return False
+            # Also check if the line itself looks like it's part of a docstring
+            if not stripped or stripped[0].isalpha() or stripped.startswith('#'):
+                # Looks like plain text documentation - check recent context for comment markers
+                recent_context = '\n'.join(context_before[-5:])
+                if '/**' in recent_context or '/*' in recent_context:
+                    return False
             return True
         
         if pattern_name == 'dos_gas_limit':
@@ -294,6 +300,17 @@ class SolidityAnalyzer:
             
             # Skip loops with named constant bounds (like MAX_NUM_WEEKS, MAX_ITERATIONS, etc.)
             if re.search(r'for\s*\([^<]*<\s*[A-Z_][A-Z0-9_]*\s*[;)]', line):
+                return False
+            
+            # Skip loops over variables that sound like they come from calldata/memory
+            # Examples: dataLength, numItems, count, length, size
+            if re.search(r'for\s*\([^<]*<\s*(dataLength|numItems|\w*Length|\w*Count|\w*Size)\s*[;)]', line, re.IGNORECASE):
+                # These are typically bounded by calldata/memory size
+                return False
+            
+            # Skip loops over time-based variables (years, months, days, etc.)
+            if re.search(r'for\s*\([^<]*<\s*(num)?\s*(Years?|Months?|Days?|Hours?)', line, re.IGNORECASE):
+                # Time-based loops are naturally bounded
                 return False
             
             # Skip byte-copy loops (payload[i] = data[i]) - these are bounded by calldata
@@ -378,6 +395,7 @@ class SolidityAnalyzer:
             return True
         
         return True  # Default: report the finding
+
 
 
         return True  # Default: report the finding
