@@ -414,8 +414,10 @@ class SolidityAnalyzer:
                 return False
             # Skip transfers to bridge2Burner (intentional)
             if 'bridge2Burner' in full_context and 'transfer(' in line:
+                return False
             # Skip OLAS transfers to treasury (OLAS reverts on failure)
             if 'treasury' in full_context and 'transfer(' in line and 'olas' in full_context.lower():
+                return False
             return True
         
         if pattern_name == 'cross_chain':
@@ -445,6 +447,7 @@ class SolidityAnalyzer:
                 return False
             # Skip OLAS transfers (OLAS reverts on failure)
             if 'olas' in full_context.lower() and 'transfer(' in line:
+                return False
             return True
         
         return True  # Default: report the finding
@@ -454,6 +457,7 @@ class SolidityAnalyzer:
         if pattern_name == 'arbitrary_external_call':
             # Skip if comment says 'must never revert' (intentional design)
             if re.search(r'(must never revert|low level call since)', full_context, re.IGNORECASE):
+                return False
             # Skip if it's a known safe pattern (address.call with explicit checks)
             if re.search(r'\(\s*bool\s+success', full_context) and re.search(r'require\s*\(\s*success', full_context):
                 return False
