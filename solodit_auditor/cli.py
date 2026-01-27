@@ -77,8 +77,8 @@ def cmd_audit(args, auditor: SoloditAuditor):
         json_path.write_text(report.to_json())
         print(f"\n📄 JSON report saved to: {json_path}")
     
-    # Save individual findings if requested
-    if args.findings_dir:
+    # Save individual findings (enabled by default, disable with --no-findings)
+    if args.findings_dir and not args.no_findings:
         created_files = report.save_individual_findings(args.findings_dir)
         if created_files:
             print(f"\n📁 Saved {len(created_files)} individual findings to: {args.findings_dir}/")
@@ -280,8 +280,10 @@ Environment Variables:
                               help='Export markdown report')
     audit_parser.add_argument('--output-json', '-j', metavar='FILE',
                               help='Export JSON report')
-    audit_parser.add_argument('--findings-dir', '-f', metavar='DIR',
-                              help='Save each finding to individual markdown files in this directory')
+    audit_parser.add_argument('--findings-dir', '-f', metavar='DIR', default='./findings',
+                              help='Save each finding to individual markdown files (default: ./findings, use --no-findings to disable)')
+    audit_parser.add_argument('--no-findings', action='store_true',
+                              help='Disable automatic saving of individual finding files')
     
     # Search command
     search_parser = subparsers.add_parser('search', help='Search Solodit for findings')
