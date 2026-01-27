@@ -360,6 +360,9 @@ class SolidityAnalyzer:
             # Skip deposit functions (user-controlled array size)
             if re.search(r'function\s+deposit', full_context, re.IGNORECASE):
                 return False
+            # Skip admin pool/oracle configuration functions
+            if re.search(r'function\s+(set|update).*(Pool|Oracle)', full_context):
+                return False
             
             return True
         
@@ -463,6 +466,9 @@ class SolidityAnalyzer:
         if pattern_name == 'arbitrary_external_call':
             # Skip if comment says 'must never revert' or 'low level call' (intentional design)
             if re.search(r'(must never revert|since it must never|low level call)', full_context, re.IGNORECASE):
+                return False
+            # Skip dispenser.call (controlled contract address)
+            if 'dispenser.call' in line:
                 return False
             # Skip if it's a known safe pattern (address.call with explicit checks)
             if re.search(r'\(\s*bool\s+success', full_context) and re.search(r'require\s*\(\s*success', full_context):
