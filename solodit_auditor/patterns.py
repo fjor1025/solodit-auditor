@@ -322,14 +322,14 @@ VULNERABILITY_PATTERNS: Dict[str, VulnerabilityPattern] = {
         name="Cross-Chain Vulnerabilities",
         keywords=["cross-chain", "bridge", "LayerZero", "Chainlink CCIP", "message passing"],
         regex_patterns=[
-            r'lzReceive',
-            r'ccipReceive',
-            r'onMessageReceived',
-            r'bridge.*\(',
-            r'sourceChain',
-            r'destinationChain',
+            # Focus on missing validations, not just bridge-related code
+            r'lzReceive\s*\([^)]*\)\s*(?:external|public)(?!.*onlyEndpoint)',  # LayerZero without endpoint check
+            r'ccipReceive\s*\([^)]*\)\s*(?:external|public)(?!.*onlyRouter)',  # CCIP without router check
+            r'onMessageReceived\s*\([^)]*\)\s*(?:external|public)(?!.*onlyBridge)',  # Bridge without validation
+            r'function\s+\w+.*\(\s*uint\d*\s+(?:source|src)Chain[^)]*\)(?!.*require.*(?:source|src)Chain)',  # Missing source chain validation
+            r'bytes\s+(?:memory\s+)?(?:payload|message|data)\s*\)\s*(?:external|public)[^{]*\{(?!.*(?:require|if|verify))',  # Unvalidated payload
         ],
-        description="Cross-chain messaging can be exploited via replay or source spoofing",
+        description="Cross-chain messaging without proper source/sender validation can be exploited",
         severity_hint=Severity.HIGH,
         solodit_tags=["Cross-Chain", "Bridge", "LayerZero"]
     ),

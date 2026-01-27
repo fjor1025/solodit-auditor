@@ -81,6 +81,12 @@ class AnalysisResult:
 class SolidityAnalyzer:
     """Analyzes Solidity code for vulnerability patterns."""
     
+    # Patterns to skip for Solidity 0.8+ (built-in overflow protection)
+    SKIP_FOR_SOLIDITY_08 = {'integer_overflow'}
+    
+    # Patterns that generate too many false positives
+    DISABLED_PATTERNS = {'missing_zero_address_check'}
+    
     def __init__(self, include_medium: bool = True):
         """
         Initialize analyzer.
@@ -95,6 +101,21 @@ class SolidityAnalyzer:
         self._compiled_patterns: Dict[str, List[re.Pattern]] = {}
         for name, pattern in self.patterns.items():
             self._compiled_patterns[name] = pattern.compile_patterns()
+    
+    def _detect_solidity_version(self, code: str) -> Optional[Tuple[int, int]]:
+        """Detect Solidity version from pragma statement."""
+        pragma_match = re.search(r'pragma\s+solidity\s*[\^>=<]*\s*(\d+)\.(\d+)', code)
+        if pragma_match:
+            return (int(pragma_match.group(1)), int(pragma_match.group(2)))
+        return None
+    
+    def _is_solidity_08_plus(self, code: str) -> bool:
+        """Check if code uses Solidity 0.8.0 or higher."""
+        version = self._detect_solidity_version(code)
+        if version:
+            major, minor = version
+            return major >= 1 or (major == 0 and minor >= 8)
+        return False
     
     def analyze_code(self, code: str, file_path: Optional[str] = None) -> AnalysisResult:
         """
@@ -115,11 +136,22 @@ class SolidityAnalyzer:
         result.imports = self._extract_imports(code)
         result.function_signatures = self._extract_functions(code)
         
+        # Detect Solidity version for smart pattern filtering
+        is_solidity_08 = self._is_solidity_08_plus(code)
+        
         # Find current function for each line
         function_map = self._build_function_map(code)
         
         # Scan for vulnerability patterns
         for pattern_name, vuln_pattern in self.patterns.items():
+            # Skip disabled patterns (e.g., zero address check)
+            if pattern_name in self.DISABLED_PATTERNS:
+                continue
+            
+            # Skip overflow checks for Solidity 0.8+ (built-in protection)
+            if is_solidity_08 and pattern_name in self.SKIP_FOR_SOLIDITY_08:
+                continue
+            
             # Skip MEDIUM if not included
             if not self.include_medium and vuln_pattern.severity_hint == Severity.MEDIUM:
                 continue
@@ -234,12 +266,15 @@ class SolidityAnalyzer:
         return func_map
     
     def _deduplicate_matches(self, matches: List[CodeMatch]) -> List[CodeMatch]:
-        """Remove duplicate matches on the same line."""
+        """Remove duplicate matches - one per pattern per function."""
         seen = set()
         unique = []
         
         for match in matches:
-            key = (match.line_number, match.pattern_name)
+            # Deduplicate by function + pattern (only one finding per pattern per function)
+            # This reduces noise significantly
+            func_key = match.function_name or f"global_{match.file_path}"
+            key = (func_key, match.pattern_name)
             if key not in seen:
                 seen.add(key)
                 unique.append(match)

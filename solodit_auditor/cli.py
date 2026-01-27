@@ -77,6 +77,16 @@ def cmd_audit(args, auditor: SoloditAuditor):
         json_path.write_text(report.to_json())
         print(f"\n📄 JSON report saved to: {json_path}")
     
+    # Save individual findings if requested
+    if args.findings_dir:
+        created_files = report.save_individual_findings(args.findings_dir)
+        if created_files:
+            print(f"\n📁 Saved {len(created_files)} individual findings to: {args.findings_dir}/")
+            for f in created_files[:5]:
+                print(f"   - {Path(f).name}")
+            if len(created_files) > 5:
+                print(f"   ... and {len(created_files) - 5} more")
+    
     # Return exit code based on findings
     if report.critical_count > 0:
         return 2
@@ -270,6 +280,8 @@ Environment Variables:
                               help='Export markdown report')
     audit_parser.add_argument('--output-json', '-j', metavar='FILE',
                               help='Export JSON report')
+    audit_parser.add_argument('--findings-dir', '-f', metavar='DIR',
+                              help='Save each finding to individual markdown files in this directory')
     
     # Search command
     search_parser = subparsers.add_parser('search', help='Search Solodit for findings')

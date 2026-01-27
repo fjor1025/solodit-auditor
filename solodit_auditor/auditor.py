@@ -4,7 +4,9 @@ Main Auditor Module
 Combines code analysis with Solodit API queries to identify real vulnerabilities.
 """
 
+import os
 import json
+import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Set
 from pathlib import Path
@@ -239,6 +241,150 @@ class AuditReport:
             data["vulnerabilities"].append(vuln_data)
         
         return json.dumps(data, indent=2)
+    
+    def save_individual_findings(self, output_dir: str) -> List[str]:
+        """
+        Save each finding to an individual markdown file.
+        
+        Args:
+            output_dir: Directory to save the findings
+            
+        Returns:
+            List of created file paths
+        """
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        created_files = []
+        
+        # Sort by severity
+        sorted_vulns = sorted(
+            self.vulnerabilities,
+            key=lambda v: (
+                {Severity.CRITICAL: 0, Severity.HIGH: 1, Severity.MEDIUM: 2}[v.code_match.severity],
+                -len(v.related_findings)
+            )
+        )
+        
+        for i, vuln in enumerate(sorted_vulns, 1):
+            # Generate filename from severity and pattern
+            severity_prefix = {
+                Severity.CRITICAL: "CRITICAL",
+                Severity.HIGH: "HIGH",
+                Severity.MEDIUM: "MEDIUM"
+            }[vuln.code_match.severity]
+            
+            # Sanitize pattern name for filename
+            pattern_name = re.sub(r'[^a-zA-Z0-9_-]', '_', vuln.code_match.pattern_name)
+            
+            # Extract function name or use 'global'
+            func_name = vuln.code_match.function_name or 'global'
+            func_name = re.sub(r'[^a-zA-Z0-9_-]', '_', func_name)
+            
+            filename = f"{i:02d}_{severity_prefix}_{pattern_name}_{func_name}.md"
+            file_path = output_path / filename
+            
+            # Write finding to markdown
+            content = self._generate_finding_markdown(vuln, i)
+            file_path.write_text(content, encoding='utf-8')
+            
+            created_files.append(str(file_path))
+        
+        return created_files
+    
+    def _generate_finding_markdown(self, vuln: PotentialVulnerability, index: int) -> str:
+        """Generate markdown content for a single finding."""
+        md = []
+        
+        severity_emoji = {
+            Severity.CRITICAL: "🔴",
+            Severity.HIGH: "🟠",
+            Severity.MEDIUM: "🟡"
+        }[vuln.code_match.severity]
+        
+        md.append(f"# {severity_emoji} Finding #{index}: {vuln.code_match.pattern_name}")
+        md.append("")
+        md.append("## Summary")
+        md.append("")
+        md.append(f"| Property | Value |")
+        md.append(f"|----------|-------|")
+        md.append(f"| **Severity** | {vuln.code_match.severity.value} |")
+        md.append(f"| **Confidence** | {vuln.confidence} |")
+        
+        if vuln.code_match.file_path:
+            # Extract relative path if possible
+            file_display = vuln.code_match.file_path.split('/')[-1] if '/' in vuln.code_match.file_path else vuln.code_match.file_path
+            md.append(f"| **File** | `{file_display}` |")
+        
+        md.append(f"| **Line** | {vuln.code_match.line_number} |")
+        
+        if vuln.code_match.function_name:
+            md.append(f"| **Function** | `{vuln.code_match.function_name}()` |")
+        
+        md.append("")
+        md.append("## Location")
+        md.append("")
+        if vuln.code_match.file_path:
+            md.append(f"**Full Path:** `{vuln.code_match.file_path}`")
+        md.append("")
+        
+        md.append("## Vulnerable Code")
+        md.append("")
+        md.append("```solidity")
+        for line in vuln.code_match.context_before:
+            md.append(line)
+        md.append(f"// @audit >>> ISSUE HERE <<<")
+        md.append(vuln.code_match.line_content)
+        for line in vuln.code_match.context_after:
+            md.append(line)
+        md.append("```")
+        
+        md.append("")
+        md.append("## Description")
+        md.append("")
+        # Get pattern description from VULNERABILITY_PATTERNS if available
+        from .patterns import VULNERABILITY_PATTERNS
+        if vuln.code_match.pattern_name in VULNERABILITY_PATTERNS:
+            pattern = VULNERABILITY_PATTERNS[vuln.code_match.pattern_name]
+            md.append(pattern.description)
+        else:
+            md.append("Potential vulnerability detected based on code pattern matching.")
+        
+        md.append("")
+        md.append("## Recommendation")
+        md.append("")
+        md.append(vuln.recommendation)
+        
+        if vuln.related_findings:
+            md.append("")
+            md.append(f"## Similar Real-World Vulnerabilities ({len(vuln.related_findings)} found)")
+            md.append("")
+            md.append("The following similar vulnerabilities have been found in real audits:")
+            md.append("")
+            
+            for j, finding in enumerate(vuln.related_findings[:5], 1):
+                md.append(f"### {j}. [{finding.impact}] {finding.title}")
+                md.append("")
+                md.append(f"- **Audit Firm:** {finding.firm_name or 'N/A'}")
+                md.append(f"- **Protocol:** {finding.protocol_name or 'N/A'}")
+                md.append(f"- **Quality Score:** {finding.quality_score:.1f}/5")
+                if finding.tags:
+                    md.append(f"- **Tags:** {', '.join(finding.tags)}")
+                md.append("")
+                
+                if finding.summary:
+                    md.append("**Summary:**")
+                    md.append(f"> {finding.summary}")
+                    md.append("")
+                
+                md.append(f"🔗 **Link:** [{finding.url}]({finding.url})")
+                md.append("")
+        
+        md.append("")
+        md.append("---")
+        md.append(f"*Generated by Solodit Auditor on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+        
+        return '\n'.join(md)
 
 
 class SoloditAuditor:
