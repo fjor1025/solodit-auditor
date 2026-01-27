@@ -354,7 +354,7 @@ class SolidityAnalyzer:
 
             # Skip admin setter functions (onlyOwner/onlyManager)
             if re.search(r'function\s+(set|update)[A-Z]', full_context):
-                if re.search(r'(onlyOwner|onlyManager|checkOwner)', full_context):
+                if re.search(r'(onlyOwner|onlyManager|checkOwner|OwnerOnly|msg\.sender\s*!=\s*owner)', full_context):
                     return False
 
             # Skip deposit functions (user-controlled array size)
