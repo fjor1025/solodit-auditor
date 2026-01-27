@@ -361,7 +361,8 @@ class SolidityAnalyzer:
             if re.search(r'function\s+deposit', full_context, re.IGNORECASE):
                 return False
             # Skip admin pool/oracle configuration functions
-            if re.search(r'function\s+(set|update).*(Pool|Oracle)', full_context):
+            # Check for set/update functions with Pool or Oracle in nearby lines
+            if re.search(r'(setV\d+Oracle|setV\d+Pool|updatePool|updateOracle)', full_context, re.IGNORECASE):
                 return False
             
             return True
@@ -468,7 +469,7 @@ class SolidityAnalyzer:
             if re.search(r'(must never revert|since it must never|low level call)', full_context, re.IGNORECASE):
                 return False
             # Skip dispenser.call (controlled contract address)
-            if 'dispenser.call' in line:
+            if 'dispenser.call' in line.lower() or 'dispenser.call' in full_context.lower():
                 return False
             # Skip if it's a known safe pattern (address.call with explicit checks)
             if re.search(r'\(\s*bool\s+success', full_context) and re.search(r'require\s*\(\s*success', full_context):
