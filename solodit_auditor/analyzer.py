@@ -93,6 +93,9 @@ class SolidityAnalyzer:
         'precision_loss',  # Too many false positives
         'reentrancy_readonly',  # Flags interface declarations
         'frontrunning',  # Too many false positives on comments/documentation
+        'oracle_manipulation',  # Flags comments and function names, not actual vulnerabilities
+        'storage_collision',  # False positives on regular initialize() functions
+        'integer_overflow',  # False positives on intentional unchecked blocks in math libraries
     }
     
     # All other patterns will be checked (with context validation for sensitive ones)
@@ -104,6 +107,7 @@ class SolidityAnalyzer:
         'cross_chain',
         'unsafe_erc20',
         'dos_gas_limit',
+        'arbitrary_external_call',
     }
     
     def __init__(self, include_medium: bool = True):
@@ -358,6 +362,9 @@ class SolidityAnalyzer:
             return True
         
         if pattern_name == 'reentrancy':
+            # Skip if comment explicitly says to ignore failures (intentional design)
+            if re.search(r'(ignore.*fail|fail.*ignore|intentionally.*ignore)', full_context, re.IGNORECASE):
+                return False
             # Skip if return value is checked
             if re.search(r'\(\s*bool\s+success', line) and re.search(r'if\s*\(\s*!?\s*success', full_context):
                 return False
@@ -367,6 +374,9 @@ class SolidityAnalyzer:
             return True
         
         if pattern_name == 'unchecked_return_value':
+            # Skip if comment explicitly says to ignore failures (intentional design)
+            if re.search(r'(ignore.*fail|fail.*ignore|intentionally.*ignore|if.*call.*fail.*ignore)', full_context, re.IGNORECASE):
+                return False
             # Skip if there's a comment saying it reverts on failure
             if re.search(r'(reverts?|revert on failure|either returns|optimized.*that.*reverts)', full_context, re.IGNORECASE):
                 return False
@@ -409,6 +419,15 @@ class SolidityAnalyzer:
 
 
 
+        if pattern_name == 'arbitrary_external_call':
+            # Skip if it's a known safe pattern (address.call with explicit checks)
+            if re.search(r'\(\s*bool\s+success', full_context) and re.search(r'require\s*\(\s*success', full_context):
+                return False
+            # Skip if comment says it's intentional
+            if re.search(r'(intentional|safe|trusted|known)', full_context, re.IGNORECASE):
+                return False
+            return True
+        
         return True  # Default: report the finding
     
     def _build_function_map(self, code: str) -> Dict[int, str]:
