@@ -267,24 +267,34 @@ class SolidityAnalyzer:
         full_context = '\n'.join(context_before) + '\n' + line + '\n' + '\n'.join(context_after)
         
         if pattern_name == 'frontrunning':
-            # Skip comments (lines starting with //, /*, or inside /** */)
+            # Skip comments - be VERY aggressive
             stripped = line.strip()
+            
+            # Skip obvious comment lines
             if stripped.startswith('//') or stripped.startswith('/*') or stripped.startswith('*'):
                 return False
-            # Check if we're inside a comment block by looking at all previous context
+            
+            # Check if we're inside any comment block by counting delimiters in ALL context
             all_before = '\n'.join(context_before)
-            # Count opening and closing comment delimiters in all context before this line
             open_comments = all_before.count('/*')
             close_comments = all_before.count('*/')
             if open_comments > close_comments:
-                # We're inside an unclosed comment block - skip this line
+                # Inside an unclosed comment block
                 return False
-            # Also check if the line itself looks like it's part of a docstring
-            if not stripped or stripped[0].isalpha() or stripped.startswith('#'):
-                # Looks like plain text documentation - check recent context for comment markers
-                recent_context = '\n'.join(context_before[-5:])
-                if '/**' in recent_context or '/*' in recent_context:
+            
+            # ULTRA-AGGRESSIVE: If any of the last 10 lines has /** or /*, assume we're in a docstring
+            recent_lines = context_before[-10:] if len(context_before) >= 10 else context_before
+            for recent_line in recent_lines:
+                if '/**' in recent_line or (recent_line.strip().startswith('/*') and not recent_line.strip().endswith('*/')):
+                    # Found an unclosed comment marker recently - likely in a docstring
                     return False
+            
+            # Also skip if line looks like plain English documentation (starts with capital letter, no code symbols)
+            if stripped and stripped[0].isupper() and not any(sym in stripped for sym in ['(', ')', '{', '}', ';', '=']):
+                # Looks like documentation prose - check if there's a comment marker above
+                if any('/*' in l for l in context_before[-5:]):
+                    return False
+            
             return True
         
         if pattern_name == 'dos_gas_limit':
