@@ -90,10 +90,18 @@ class SolidityAnalyzer:
         'access_control',  # Flags functions that already have checks
         'centralization_risk',  # Informational, not actual vulnerabilities
         'timestamp_dependence',  # Too common, low-risk in most cases
+        'unchecked_return_value',  # Can't distinguish checked vs unchecked
+        'precision_loss',  # Too many false positives
     }
     
     # Patterns to validate with context (only report if context looks suspicious)
-    CONTEXT_SENSITIVE_PATTERNS = {'dos_gas_limit', 'delegatecall_injection'}
+    CONTEXT_SENSITIVE_PATTERNS = {
+        'dos_gas_limit', 
+        'delegatecall_injection',
+        'reentrancy',
+        'cross_chain',
+        'unsafe_erc20',
+    }
     
     def __init__(self, include_medium: bool = True):
         """
@@ -262,33 +270,69 @@ class SolidityAnalyzer:
                 return False
             # Skip loops with clear bounds from function parameters (bounded by calldata)
             if 'SELECTOR_DATA_LENGTH' in full_context or 'data.length' in full_context:
-                # Check if it's just copying bytes - low risk
                 if re.search(r'\w+\[\w+\]\s*=\s*\w+\[\w+\s*\+', full_context):
                     return False
             # Skip if there's an explicit length check nearby
             if re.search(r'require.*\.length\s*(<|<=|>)', full_context):
                 return False
-            # Only flag if iterating over unbounded storage arrays
-            if '.length' in line and not re.search(r'(calldata|memory|data\.length)', full_context):
-                return True
-            # Flag target/selector loops without bounds
-            if 'targets.length' in full_context and 'require' not in full_context:
+            # Skip loops over function parameters (bounded by calldata)
+            if re.search(r'for.*targets\.length|for.*selectors\.length|for.*callDatas\.length', full_context):
+                return False
+            return True
+        
+        if pattern_name == 'delegatecall_injection':
+            # Skip if target comes from trusted storage (bridgeParams, verifier, etc.)
+            if re.search(r'(bridgeParams|verifier|implementation|_implementation)\.\w+\.delegatecall', full_context):
+                return False
+            # Skip if it's clearly a proxy pattern
+            if 'EIP1967' in full_context or 'IMPLEMENTATION_SLOT' in full_context:
+                return False
+            # Only flag if target appears to be user-controlled
+            if re.search(r'delegatecall.*\(\s*\w+\s*\)', full_context):
+                # Check for any validation
+                if not re.search(r'(require|if|mapping|onlyOwner|onlyAdmin)', full_context):
+                    return True
+            return False  # Default: don't report delegatecall (too many false positives)
+        
+        if pattern_name == 'reentrancy':
+            # Skip if sender is validated (bridge patterns)
+            if re.search(r'(msg\.sender\s*!=|msg\.sender\s*==)\s*\w*(Proxy|Bridge|Mediator|Relayer|Contract)', full_context, re.IGNORECASE):
+                return False
+            # Skip if there's access control
+            if re.search(r'(onlyOwner|onlyAdmin|onlyRole|onlyBridge|onlyRelayer|modifier)', full_context):
+                return False
+            # Skip if in a function that validates sender at the start
+            if re.search(r'require\s*\(\s*msg\.sender\s*==', '\n'.join(context_before)):
+                return False
+            # Skip if return value is checked (not blind call)
+            if re.search(r'\(\s*bool\s+success.*\)\s*=.*\.call', line) and re.search(r'if\s*\(\s*!?\s*success', full_context):
+                return False
+            return True
+        
+        if pattern_name == 'cross_chain':
+            # Skip interface definitions
+            if re.search(r'interface\s+\w+', full_context):
+                return False
+            # Skip if just a function declaration in interface
+            if 'function' in line and 'external' in line and '{' not in full_context:
+                return False
+            # Only flag actual implementations with missing validation
+            if re.search(r'function\s+\w+.*\{', full_context):
+                # Check if there's sender validation
+                if re.search(r'(msg\.sender\s*==|require.*sender|onlyBridge|onlyRelayer)', full_context):
+                    return False
                 return True
             return False
         
-        if pattern_name == 'delegatecall_injection':
-            # Skip if delegatecall target is from immutable/constant or constructor-set storage
-            if re.search(r'(immutable|constant|verifier|implementation)', full_context, re.IGNORECASE):
-                # Check if there's validation of the address
-                if re.search(r'(require|if).*address', full_context):
+        if pattern_name == 'unsafe_erc20':
+            # Skip if return value is captured and checked
+            if re.search(r'bool\s+success\s*=.*\.(transfer|transferFrom|approve)', line):
+                if re.search(r'if\s*\(\s*!?\s*success', full_context):
                     return False
-            # Skip if it's clearly a proxy pattern with proper setup
-            if 'EIP1967' in full_context or 'IMPLEMENTATION_SLOT' in full_context:
+            # Skip if using SafeERC20
+            if 'safeTransfer' in full_context or 'SafeERC20' in full_context:
                 return False
-            # Flag arbitrary user-controlled delegatecall
-            if re.search(r'delegatecall.*\(.*\bdata\b', full_context) and 'msg.sender' not in full_context:
-                return True
-            return True  # Default to reporting delegatecall
+            return True
         
         return True  # Default: report the finding
     
