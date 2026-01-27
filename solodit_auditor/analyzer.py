@@ -415,14 +415,17 @@ class SolidityAnalyzer:
             # Skip transfers to bridge2Burner (intentional)
             if 'bridge2Burner' in full_context and 'transfer(' in line:
                 return False
-            # Skip OLAS transfers to treasury (OLAS reverts on failure)
-            if 'treasury' in full_context and 'transfer(' in line and 'olas' in full_context.lower():
+            # Skip OLAS transfers to treasury/timelock (OLAS reverts on failure)
+            if ('treasury' in full_context or 'timelock' in full_context) and 'transfer(' in line and 'olas' in full_context.lower():
                 return False
             return True
         
         if pattern_name == 'cross_chain':
             # Skip interface definitions (no implementation body)
             if ';' in line and '{' not in line:
+                return False
+            # Skip initialize() functions (not cross-chain related)
+            if 'function initialize(' in full_context:
                 return False
             # Skip if sender is validated using bridge methods
             if re.search(r'(messageSender|xDomainMessageSender|sender)\s*\(\s*\)', full_context):
@@ -448,6 +451,9 @@ class SolidityAnalyzer:
             # Skip OLAS transfers (OLAS reverts on failure)
             if 'olas' in full_context.lower() and 'transfer(' in line:
                 return False
+            # Skip transfers to treasury (typically safe tokens)
+            if 'treasury' in full_context and 'transfer(' in line:
+                return False
             return True
         
         return True  # Default: report the finding
@@ -455,8 +461,8 @@ class SolidityAnalyzer:
 
 
         if pattern_name == 'arbitrary_external_call':
-            # Skip if comment says 'must never revert' (intentional design)
-            if re.search(r'(must never revert|low level call since)', full_context, re.IGNORECASE):
+            # Skip if comment says 'must never revert' or 'low level call' (intentional design)
+            if re.search(r'(must never revert|since it must never|low level call)', full_context, re.IGNORECASE):
                 return False
             # Skip if it's a known safe pattern (address.call with explicit checks)
             if re.search(r'\(\s*bool\s+success', full_context) and re.search(r'require\s*\(\s*success', full_context):
