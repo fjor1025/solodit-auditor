@@ -85,7 +85,15 @@ class SolidityAnalyzer:
     SKIP_FOR_SOLIDITY_08 = {'integer_overflow'}
     
     # Patterns that generate too many false positives
-    DISABLED_PATTERNS = {'missing_zero_address_check'}
+    DISABLED_PATTERNS = {
+        'missing_zero_address_check',  # Too noisy, most code handles this
+        'access_control',  # Flags functions that already have checks
+        'centralization_risk',  # Informational, not actual vulnerabilities
+        'timestamp_dependence',  # Too common, low-risk in most cases
+    }
+    
+    # Patterns to validate with context (only report if context looks suspicious)
+    CONTEXT_SENSITIVE_PATTERNS = {'dos_gas_limit', 'delegatecall_injection'}
     
     def __init__(self, include_medium: bool = True):
         """
@@ -168,6 +176,11 @@ class SolidityAnalyzer:
                     # Find which function this is in
                     func_name = function_map.get(line_num)
                     
+                    # Context-sensitive validation to reduce false positives
+                    if pattern_name in self.CONTEXT_SENSITIVE_PATTERNS:
+                        if not self._validate_pattern_context(pattern_name, lines[line_num-1] if line_num <= len(lines) else "", context_before, context_after):
+                            continue
+                    
                     code_match = CodeMatch(
                         pattern_name=pattern_name,
                         line_number=line_num,
@@ -235,6 +248,49 @@ class SolidityAnalyzer:
         """Extract function signatures."""
         pattern = r'function\s+(\w+)\s*\([^)]*\)\s*(?:public|external|internal|private)?[^{]*'
         return re.findall(pattern, code)
+    
+    def _validate_pattern_context(self, pattern_name: str, line: str, context_before: List[str], context_after: List[str]) -> bool:
+        """
+        Validate if a pattern match is likely a true positive based on context.
+        Returns False for likely false positives.
+        """
+        full_context = '\n'.join(context_before) + '\n' + line + '\n' + '\n'.join(context_after)
+        
+        if pattern_name == 'dos_gas_limit':
+            # Skip byte-copy loops (payload[i] = data[i]) - these are bounded by calldata
+            if re.search(r'payload\[\w+\]\s*=\s*data\[', full_context):
+                return False
+            # Skip loops with clear bounds from function parameters (bounded by calldata)
+            if 'SELECTOR_DATA_LENGTH' in full_context or 'data.length' in full_context:
+                # Check if it's just copying bytes - low risk
+                if re.search(r'\w+\[\w+\]\s*=\s*\w+\[\w+\s*\+', full_context):
+                    return False
+            # Skip if there's an explicit length check nearby
+            if re.search(r'require.*\.length\s*(<|<=|>)', full_context):
+                return False
+            # Only flag if iterating over unbounded storage arrays
+            if '.length' in line and not re.search(r'(calldata|memory|data\.length)', full_context):
+                return True
+            # Flag target/selector loops without bounds
+            if 'targets.length' in full_context and 'require' not in full_context:
+                return True
+            return False
+        
+        if pattern_name == 'delegatecall_injection':
+            # Skip if delegatecall target is from immutable/constant or constructor-set storage
+            if re.search(r'(immutable|constant|verifier|implementation)', full_context, re.IGNORECASE):
+                # Check if there's validation of the address
+                if re.search(r'(require|if).*address', full_context):
+                    return False
+            # Skip if it's clearly a proxy pattern with proper setup
+            if 'EIP1967' in full_context or 'IMPLEMENTATION_SLOT' in full_context:
+                return False
+            # Flag arbitrary user-controlled delegatecall
+            if re.search(r'delegatecall.*\(.*\bdata\b', full_context) and 'msg.sender' not in full_context:
+                return True
+            return True  # Default to reporting delegatecall
+        
+        return True  # Default: report the finding
     
     def _build_function_map(self, code: str) -> Dict[int, str]:
         """Build a map of line numbers to function names."""
