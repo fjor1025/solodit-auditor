@@ -272,8 +272,12 @@ class SolidityAnalyzer:
             if stripped.startswith('//') or stripped.startswith('/*') or stripped.startswith('*'):
                 return False
             # Check if we're inside a comment block by looking at context
-            context_text = ' '.join(context_before)
-            if '/*' in context_text and '*/' not in context_text:
+            context_text = '\n'.join(context_before)
+            # Count opening and closing comment delimiters
+            open_comments = context_text.count('/*')
+            close_comments = context_text.count('*/')
+            if open_comments > close_comments:
+                # We're inside an unclosed comment block
                 return False
             return True
         
@@ -284,8 +288,12 @@ class SolidityAnalyzer:
                 if not re.search(r'\bfor\s*\(', full_context):
                     return False
             
-            # Skip loops with hardcoded upper bounds (like < 255)
-            if re.search(r'for\s*\([^<]*<\s*\d{1,3}\s*;', line):
+            # Skip loops with hardcoded upper bounds (like < 255, < 100, etc.)
+            if re.search(r'for\s*\([^<]*<\s*\d{1,3}\s*[;)]', line):
+                return False
+            
+            # Skip loops with named constant bounds (like MAX_NUM_WEEKS, MAX_ITERATIONS, etc.)
+            if re.search(r'for\s*\([^<]*<\s*[A-Z_][A-Z0-9_]*\s*[;)]', line):
                 return False
             
             # Skip byte-copy loops (payload[i] = data[i]) - these are bounded by calldata
@@ -301,9 +309,13 @@ class SolidityAnalyzer:
             if re.search(r'require.*\.length\s*(<|<=|>)', full_context):
                 return False
             
-            # Skip loops over function parameters (bounded by calldata)
-            if re.search(r'for.*targets\.length|for.*selectors\.length|for.*callDatas\.length', full_context):
-                return False
+            # Skip loops over calldata/memory arrays (function parameters) - these are bounded
+            if re.search(r'for.*\w+\.length', line):
+                # Check if it's a storage array or just a memory/calldata parameter
+                # Storage arrays would have `storage` keyword or be state variables
+                if 'storage' not in full_context:
+                    # Likely a calldata/memory array parameter - skip it
+                    return False
             
             return True
         
@@ -329,6 +341,9 @@ class SolidityAnalyzer:
         if pattern_name == 'unchecked_return_value':
             # Skip if there's a comment saying it reverts on failure
             if re.search(r'(reverts?|revert on failure|either returns|optimized.*that.*reverts)', full_context, re.IGNORECASE):
+                return False
+            # Skip approve() calls - we already filter these in unsafe_erc20
+            if re.search(r'\.approve\s*\(', line):
                 return False
             # Only report if return value is truly ignored (no bool capture)
             if re.search(r'\(\s*bool\s+(success|ok)', full_context):
@@ -363,6 +378,7 @@ class SolidityAnalyzer:
             return True
         
         return True  # Default: report the finding
+
 
         return True  # Default: report the finding
     
