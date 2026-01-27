@@ -84,24 +84,34 @@ class SolidityAnalyzer:
     # Patterns to skip for Solidity 0.8+ (built-in overflow protection)
     SKIP_FOR_SOLIDITY_08 = {'integer_overflow'}
     
-    # Patterns that generate too many false positives
+    # Patterns that generate too many false positives - DISABLED
     DISABLED_PATTERNS = {
-        'missing_zero_address_check',  # Too noisy, most code handles this
+        'missing_zero_address_check',  # Too noisy
         'access_control',  # Flags functions that already have checks
-        'centralization_risk',  # Informational, not actual vulnerabilities
-        'timestamp_dependence',  # Too common, low-risk in most cases
+        'centralization_risk',  # Informational only
+        'timestamp_dependence',  # Too common, low-risk
         'unchecked_return_value',  # Can't distinguish checked vs unchecked
         'precision_loss',  # Too many false positives
+        'reentrancy_readonly',  # Flags interface declarations
+        'dos_gas_limit',  # Almost all are bounded loops
+        'unsafe_erc20',  # Flags approve() which isn't risky
+        'cross_chain',  # Flags validated bridge receivers
+        'reentrancy',  # Flags any .call{} even with checks
     }
     
-    # Patterns to validate with context (only report if context looks suspicious)
-    CONTEXT_SENSITIVE_PATTERNS = {
-        'dos_gas_limit', 
-        'delegatecall_injection',
-        'reentrancy',
-        'cross_chain',
-        'unsafe_erc20',
+    # Keep only high-signal patterns
+    ENABLED_PATTERNS = {
+        'oracle_manipulation',  # Specific: getReserves, slot0, latestAnswer
+        'flash_loan_vulnerability',  # Specific: flash loan callbacks
+        'signature_replay',  # Specific: ecrecover without nonces
+        'frontrunning',  # Specific: zero slippage, deadline issues
+        'delegatecall_injection',  # Specific: delegatecall to untrusted
+        'unprotected_selfdestruct',  # Specific: selfdestruct
+        'arbitrary_external_call',  # Specific: arbitrary .call
     }
+    
+    # Context-sensitive patterns (validate before reporting)
+    CONTEXT_SENSITIVE_PATTERNS = {'delegatecall_injection', 'frontrunning'}
     
     def __init__(self, include_medium: bool = True):
         """
@@ -158,10 +168,10 @@ class SolidityAnalyzer:
         # Find current function for each line
         function_map = self._build_function_map(code)
         
-        # Scan for vulnerability patterns
+        # Scan for vulnerability patterns - ONLY enabled high-signal patterns
         for pattern_name, vuln_pattern in self.patterns.items():
-            # Skip disabled patterns (e.g., zero address check)
-            if pattern_name in self.DISABLED_PATTERNS:
+            # Only use explicitly enabled patterns
+            if pattern_name not in self.ENABLED_PATTERNS:
                 continue
             
             # Skip overflow checks for Solidity 0.8+ (built-in protection)
@@ -287,52 +297,27 @@ class SolidityAnalyzer:
             # Skip if it's clearly a proxy pattern
             if 'EIP1967' in full_context or 'IMPLEMENTATION_SLOT' in full_context:
                 return False
-            # Only flag if target appears to be user-controlled
+            # Skip if target is from trusted storage (mapping, state variable)
+            if re.search(r'(map\w+|_\w+|verifier)\[?.*\]?\.delegatecall', full_context, re.IGNORECASE):
+                return False
+            # Only flag if target appears to be user-controlled parameter
             if re.search(r'delegatecall.*\(\s*\w+\s*\)', full_context):
                 # Check for any validation
-                if not re.search(r'(require|if|mapping|onlyOwner|onlyAdmin)', full_context):
+                if not re.search(r'(require|if|mapping|onlyOwner|onlyAdmin|immutable|constant)', full_context):
                     return True
-            return False  # Default: don't report delegatecall (too many false positives)
+            return False  # Default: don't report delegatecall
         
-        if pattern_name == 'reentrancy':
-            # Skip if sender is validated (bridge patterns)
-            if re.search(r'(msg\.sender\s*!=|msg\.sender\s*==)\s*\w*(Proxy|Bridge|Mediator|Relayer|Contract)', full_context, re.IGNORECASE):
+        if pattern_name == 'frontrunning':
+            # Skip if there's slippage protection (non-zero minOut)
+            if re.search(r'(minOut|amountOutMin|minAmount)\s*[>!]=\s*0', full_context):
                 return False
-            # Skip if there's access control
-            if re.search(r'(onlyOwner|onlyAdmin|onlyRole|onlyBridge|onlyRelayer|modifier)', full_context):
+            # Skip if deadline is properly set
+            if re.search(r'deadline\s*[=:]\s*block\.timestamp\s*\+', full_context):
                 return False
-            # Skip if in a function that validates sender at the start
-            if re.search(r'require\s*\(\s*msg\.sender\s*==', '\n'.join(context_before)):
-                return False
-            # Skip if return value is checked (not blind call)
-            if re.search(r'\(\s*bool\s+success.*\)\s*=.*\.call', line) and re.search(r'if\s*\(\s*!?\s*success', full_context):
-                return False
-            return True
-        
-        if pattern_name == 'cross_chain':
-            # Skip interface definitions
-            if re.search(r'interface\s+\w+', full_context):
-                return False
-            # Skip if just a function declaration in interface
-            if 'function' in line and 'external' in line and '{' not in full_context:
-                return False
-            # Only flag actual implementations with missing validation
-            if re.search(r'function\s+\w+.*\{', full_context):
-                # Check if there's sender validation
-                if re.search(r'(msg\.sender\s*==|require.*sender|onlyBridge|onlyRelayer)', full_context):
-                    return False
+            # Only flag zero slippage or timestamp-based deadlines
+            if re.search(r'(amountOutMin|minOut)\s*[=:]\s*0|deadline.*block\.timestamp[^+]', full_context):
                 return True
             return False
-        
-        if pattern_name == 'unsafe_erc20':
-            # Skip if return value is captured and checked
-            if re.search(r'bool\s+success\s*=.*\.(transfer|transferFrom|approve)', line):
-                if re.search(r'if\s*\(\s*!?\s*success', full_context):
-                    return False
-            # Skip if using SafeERC20
-            if 'safeTransfer' in full_context or 'SafeERC20' in full_context:
-                return False
-            return True
         
         return True  # Default: report the finding
     
