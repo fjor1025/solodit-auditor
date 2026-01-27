@@ -92,6 +92,7 @@ class SolidityAnalyzer:
         'timestamp_dependence',  # Too common, low-risk
         'precision_loss',  # Too many false positives
         'reentrancy_readonly',  # Flags interface declarations
+        'frontrunning',  # Too many false positives on comments/documentation
     }
     
     # All other patterns will be checked (with context validation for sensitive ones)
