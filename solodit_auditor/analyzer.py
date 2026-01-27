@@ -189,7 +189,7 @@ class SolidityAnalyzer:
                     
                     # Get context
                     context_before = lines[max(0, line_num-20):line_num-1]
-                    context_after = lines[line_num:min(len(lines), line_num+3)]
+                    context_after = lines[line_num:min(len(lines), line_num+10)]
                     
                     # Find which function this is in
                     func_name = function_map.get(line_num)
