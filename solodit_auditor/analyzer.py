@@ -460,7 +460,6 @@ class SolidityAnalyzer:
                 return False
             return True
         
-        return True  # Default: report the finding
 
 
 
