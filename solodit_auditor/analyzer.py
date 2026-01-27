@@ -96,6 +96,8 @@ class SolidityAnalyzer:
         'oracle_manipulation',  # Flags comments and function names, not actual vulnerabilities
         'storage_collision',  # False positives on regular initialize() functions
         'integer_overflow',  # False positives on intentional unchecked blocks in math libraries
+        'inflation_attack',  # False positives on simple totalSupply checks
+        'erc721_erc1155_callback',  # False positives on library functions
     }
     
     # All other patterns will be checked (with context validation for sensitive ones)
@@ -365,6 +367,11 @@ class SolidityAnalyzer:
             # Skip if comment explicitly says to ignore failures (intentional design)
             if re.search(r'(ignore.*fail|fail.*ignore|intentionally.*ignore)', full_context, re.IGNORECASE):
                 return False
+            # Skip if it's a view/pure function call (no state changes possible)
+            if re.search(r'(view|pure|verify|check|get)\s*\(', full_context, re.IGNORECASE):
+                # Check if the function being called looks like a view function
+                if re.search(r'(verify|check|get)[A-Z]', full_context):
+                    return False
             # Skip if return value is checked
             if re.search(r'\(\s*bool\s+success', line) and re.search(r'if\s*\(\s*!?\s*success', full_context):
                 return False
@@ -395,7 +402,10 @@ class SolidityAnalyzer:
             # Skip interface definitions (no implementation body)
             if ';' in line and '{' not in line:
                 return False
-            # Skip if sender is validated
+            # Skip if sender is validated using bridge methods
+            if re.search(r'(messageSender|xDomainMessageSender|sender)\s*\(\s*\)', full_context):
+                return False
+            # Skip if sender is validated with comparison
             if re.search(r'msg\.sender\s*(==|!=)', full_context):
                 return False
             return True
