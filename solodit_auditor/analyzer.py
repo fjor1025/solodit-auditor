@@ -188,7 +188,7 @@ class SolidityAnalyzer:
                     line_num = code[:match.start()].count('\n') + 1
                     
                     # Get context
-                    context_before = lines[max(0, line_num-4):line_num-1]
+                    context_before = lines[max(0, line_num-20):line_num-1]
                     context_after = lines[line_num:min(len(lines), line_num+3)]
                     
                     # Find which function this is in
