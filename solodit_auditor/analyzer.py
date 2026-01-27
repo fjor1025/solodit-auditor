@@ -266,20 +266,45 @@ class SolidityAnalyzer:
         """
         full_context = '\n'.join(context_before) + '\n' + line + '\n' + '\n'.join(context_after)
         
+        if pattern_name == 'frontrunning':
+            # Skip comments (lines starting with //, /*, or inside /** */)
+            stripped = line.strip()
+            if stripped.startswith('//') or stripped.startswith('/*') or stripped.startswith('*'):
+                return False
+            # Check if we're inside a comment block by looking at context
+            context_text = ' '.join(context_before)
+            if '/*' in context_text and '*/' not in context_text:
+                return False
+            return True
+        
         if pattern_name == 'dos_gas_limit':
+            # Skip single .push() operations that are not inside a loop
+            if '.push(' in line:
+                # Check if we're inside a loop by looking for 'for' in context
+                if not re.search(r'\bfor\s*\(', full_context):
+                    return False
+            
+            # Skip loops with hardcoded upper bounds (like < 255)
+            if re.search(r'for\s*\([^<]*<\s*\d{1,3}\s*;', line):
+                return False
+            
             # Skip byte-copy loops (payload[i] = data[i]) - these are bounded by calldata
             if re.search(r'payload\[\w+\]\s*=\s*data\[', full_context):
                 return False
+            
             # Skip loops with clear bounds from function parameters (bounded by calldata)
             if 'SELECTOR_DATA_LENGTH' in full_context or 'data.length' in full_context:
                 if re.search(r'\w+\[\w+\]\s*=\s*\w+\[\w+\s*\+', full_context):
                     return False
+            
             # Skip if there's an explicit length check nearby
             if re.search(r'require.*\.length\s*(<|<=|>)', full_context):
                 return False
+            
             # Skip loops over function parameters (bounded by calldata)
             if re.search(r'for.*targets\.length|for.*selectors\.length|for.*callDatas\.length', full_context):
                 return False
+            
             return True
         
         if pattern_name == 'delegatecall_injection':
@@ -302,6 +327,9 @@ class SolidityAnalyzer:
             return True
         
         if pattern_name == 'unchecked_return_value':
+            # Skip if there's a comment saying it reverts on failure
+            if re.search(r'(reverts?|revert on failure|either returns|optimized.*that.*reverts)', full_context, re.IGNORECASE):
+                return False
             # Only report if return value is truly ignored (no bool capture)
             if re.search(r'\(\s*bool\s+(success|ok)', full_context):
                 return False
@@ -320,10 +348,13 @@ class SolidityAnalyzer:
             return True
         
         if pattern_name == 'unsafe_erc20':
+            # Skip if there's a comment saying it reverts on failure
+            if re.search(r'(reverts?|revert on failure|either returns|optimized.*that.*reverts)', full_context, re.IGNORECASE):
+                return False
             # Skip if using SafeERC20
             if 'safeTransfer' in full_context or 'SafeERC20' in full_context:
                 return False
-            # Skip approve() - focus on transfer/transferFrom
+            # Skip approve() - it's usually not a critical issue
             if '.approve(' in line:
                 return False
             # Skip if return value is captured
@@ -331,18 +362,8 @@ class SolidityAnalyzer:
                 return False
             return True
         
-        if pattern_name == 'dos_gas_limit':
-            # Skip byte-copy loops
-            if re.search(r'\w+\[\w+\]\s*=\s*\w+\[\w+', full_context):
-                return False
-            # Skip if bounded by calldata (data.length, memory)
-            if re.search(r'(data\.length|calldata|memory)', full_context):
-                return False
-            # Report if iterating over storage arrays
-            if '.length' in line:
-                return True
-            return False
-        
+        return True  # Default: report the finding
+
         return True  # Default: report the finding
     
     def _build_function_map(self, code: str) -> Dict[int, str]:
