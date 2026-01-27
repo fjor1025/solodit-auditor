@@ -379,8 +379,10 @@ class SolidityAnalyzer:
                 return False
             # Skip if comment mentions standard/safe transfer implementation
             if re.search(r'(standard transfer|safe by default|realization has.*transfer)', full_context, re.IGNORECASE):
+                return False
             # Skip if it's verifyInstance function call (view function)
             if re.search(r'(verify|get)InstanceAnd', full_context, re.IGNORECASE):
+                return False
             # Skip if it's a view/pure function call (no state changes possible)
             if re.search(r'(view|pure|verify|check|get)\s*\(', full_context, re.IGNORECASE):
                 # Check if the function being called looks like a view function
