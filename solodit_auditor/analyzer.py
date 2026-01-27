@@ -84,34 +84,26 @@ class SolidityAnalyzer:
     # Patterns to skip for Solidity 0.8+ (built-in overflow protection)
     SKIP_FOR_SOLIDITY_08 = {'integer_overflow'}
     
-    # Patterns that generate too many false positives - DISABLED
+    # Patterns that always generate false positives - DISABLED
     DISABLED_PATTERNS = {
         'missing_zero_address_check',  # Too noisy
         'access_control',  # Flags functions that already have checks
         'centralization_risk',  # Informational only
         'timestamp_dependence',  # Too common, low-risk
-        'unchecked_return_value',  # Can't distinguish checked vs unchecked
         'precision_loss',  # Too many false positives
         'reentrancy_readonly',  # Flags interface declarations
-        'dos_gas_limit',  # Almost all are bounded loops
-        'unsafe_erc20',  # Flags approve() which isn't risky
-        'cross_chain',  # Flags validated bridge receivers
-        'reentrancy',  # Flags any .call{} even with checks
     }
     
-    # Keep only high-signal patterns
-    ENABLED_PATTERNS = {
-        'oracle_manipulation',  # Specific: getReserves, slot0, latestAnswer
-        'flash_loan_vulnerability',  # Specific: flash loan callbacks
-        'signature_replay',  # Specific: ecrecover without nonces
-        'frontrunning',  # Specific: zero slippage, deadline issues
-        'delegatecall_injection',  # Specific: delegatecall to untrusted
-        'unprotected_selfdestruct',  # Specific: selfdestruct
-        'arbitrary_external_call',  # Specific: arbitrary .call
-    }
-    
+    # All other patterns will be checked (with context validation for sensitive ones)
     # Context-sensitive patterns (validate before reporting)
-    CONTEXT_SENSITIVE_PATTERNS = {'delegatecall_injection', 'frontrunning'}
+    CONTEXT_SENSITIVE_PATTERNS = {
+        'delegatecall_injection',
+        'reentrancy', 
+        'unchecked_return_value',
+        'cross_chain',
+        'unsafe_erc20',
+        'dos_gas_limit',
+    }
     
     def __init__(self, include_medium: bool = True):
         """
@@ -168,10 +160,10 @@ class SolidityAnalyzer:
         # Find current function for each line
         function_map = self._build_function_map(code)
         
-        # Scan for vulnerability patterns - ONLY enabled high-signal patterns
+        # Scan for vulnerability patterns
         for pattern_name, vuln_pattern in self.patterns.items():
-            # Only use explicitly enabled patterns
-            if pattern_name not in self.ENABLED_PATTERNS:
+            # Skip disabled patterns
+            if pattern_name in self.DISABLED_PATTERNS:
                 continue
             
             # Skip overflow checks for Solidity 0.8+ (built-in protection)
@@ -291,31 +283,63 @@ class SolidityAnalyzer:
             return True
         
         if pattern_name == 'delegatecall_injection':
-            # Skip if target comes from trusted storage (bridgeParams, verifier, etc.)
-            if re.search(r'(bridgeParams|verifier|implementation|_implementation)\.\w+\.delegatecall', full_context):
-                return False
-            # Skip if it's clearly a proxy pattern
+            # Skip if it's clearly a proxy pattern with EIP-1967
             if 'EIP1967' in full_context or 'IMPLEMENTATION_SLOT' in full_context:
                 return False
-            # Skip if target is from trusted storage (mapping, state variable)
-            if re.search(r'(map\w+|_\w+|verifier)\[?.*\]?\.delegatecall', full_context, re.IGNORECASE):
+            # Skip internal delegation function (_delegate is usually in proxy base)
+            if '_delegate(' in line and 'function _delegate' in full_context:
                 return False
-            # Only flag if target appears to be user-controlled parameter
-            if re.search(r'delegatecall.*\(\s*\w+\s*\)', full_context):
-                # Check for any validation
-                if not re.search(r'(require|if|mapping|onlyOwner|onlyAdmin|immutable|constant)', full_context):
-                    return True
-            return False  # Default: don't report delegatecall
+            # Report delegatecall - it's always worth reviewing
+            return True
         
-        if pattern_name == 'frontrunning':
-            # Skip if there's slippage protection (non-zero minOut)
-            if re.search(r'(minOut|amountOutMin|minAmount)\s*[>!]=\s*0', full_context):
+        if pattern_name == 'reentrancy':
+            # Skip if return value is checked
+            if re.search(r'\(\s*bool\s+success', line) and re.search(r'if\s*\(\s*!?\s*success', full_context):
                 return False
-            # Skip if deadline is properly set
-            if re.search(r'deadline\s*[=:]\s*block\.timestamp\s*\+', full_context):
+            # Skip if using ReentrancyGuard
+            if 'nonReentrant' in full_context or 'ReentrancyGuard' in full_context:
                 return False
-            # Only flag zero slippage or timestamp-based deadlines
-            if re.search(r'(amountOutMin|minOut)\s*[=:]\s*0|deadline.*block\.timestamp[^+]', full_context):
+            return True
+        
+        if pattern_name == 'unchecked_return_value':
+            # Only report if return value is truly ignored (no bool capture)
+            if re.search(r'\(\s*bool\s+(success|ok)', full_context):
+                return False
+            # Skip if there's a require/if check nearby
+            if re.search(r'(require|if)\s*\(', full_context):
+                return False
+            return True
+        
+        if pattern_name == 'cross_chain':
+            # Skip interface definitions (no implementation body)
+            if ';' in line and '{' not in line:
+                return False
+            # Skip if sender is validated
+            if re.search(r'msg\.sender\s*(==|!=)', full_context):
+                return False
+            return True
+        
+        if pattern_name == 'unsafe_erc20':
+            # Skip if using SafeERC20
+            if 'safeTransfer' in full_context or 'SafeERC20' in full_context:
+                return False
+            # Skip approve() - focus on transfer/transferFrom
+            if '.approve(' in line:
+                return False
+            # Skip if return value is captured
+            if re.search(r'bool\s+\w+\s*=.*\.(transfer|transferFrom)', full_context):
+                return False
+            return True
+        
+        if pattern_name == 'dos_gas_limit':
+            # Skip byte-copy loops
+            if re.search(r'\w+\[\w+\]\s*=\s*\w+\[\w+', full_context):
+                return False
+            # Skip if bounded by calldata (data.length, memory)
+            if re.search(r'(data\.length|calldata|memory)', full_context):
+                return False
+            # Report if iterating over storage arrays
+            if '.length' in line:
                 return True
             return False
         
