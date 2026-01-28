@@ -10,8 +10,9 @@ from .auditor import SoloditAuditor, create_auditor, AuditReport, PotentialVulne
 from .api_client import SoloditAPIClient, create_client, Finding, SearchResult
 from .analyzer import SolidityAnalyzer, AnalysisResult, CodeMatch
 from .patterns import Severity, VulnerabilityPattern, VULNERABILITY_PATTERNS
+from .semantic_validator import SemanticValidator, ValidationContext, ValidationResult, create_validator
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "Security Auditor"
 
 __all__ = [
@@ -19,10 +20,12 @@ __all__ = [
     "SoloditAuditor",
     "SoloditAPIClient", 
     "SolidityAnalyzer",
+    "SemanticValidator",
     
     # Factory functions
     "create_auditor",
     "create_client",
+    "create_validator",
     
     # Data classes
     "AuditReport",
@@ -31,6 +34,8 @@ __all__ = [
     "SearchResult",
     "AnalysisResult",
     "CodeMatch",
+    "ValidationContext",
+    "ValidationResult",
     
     # Patterns
     "Severity",

@@ -268,6 +268,10 @@ Environment Variables:
                         help='Only show CRITICAL and HIGH severity (exclude MEDIUM)')
     parser.add_argument('--quiet', '-q', action='store_true',
                         help='Suppress banner and verbose output')
+    parser.add_argument('--no-strict-validation', action='store_true',
+                        help='Disable semantic validation (may produce more false positives)')
+    parser.add_argument('--show-filtered', action='store_true',
+                        help='Show findings that were filtered out by validation (for debugging)')
     
     subparsers = parser.add_subparsers(dest='command', help='Commands')
     
@@ -333,8 +337,13 @@ Environment Variables:
         auditor = create_auditor(
             api_key=api_key,
             include_medium=not args.high_only,
-            enable_cache=not args.no_cache
+            enable_cache=not args.no_cache,
+            strict_validation=not args.no_strict_validation
         ) if needs_api else None
+        
+        # Pass show_filtered to auditor if available
+        if auditor and hasattr(args, 'show_filtered'):
+            auditor.show_filtered = args.show_filtered
         
         if args.command == 'audit':
             exit_code = cmd_audit(args, auditor)

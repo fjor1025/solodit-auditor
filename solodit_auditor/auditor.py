@@ -2,6 +2,7 @@
 Main Auditor Module
 
 Combines code analysis with Solodit API queries to identify real vulnerabilities.
+Uses semantic validation to eliminate false positives.
 """
 
 import os
@@ -15,6 +16,7 @@ from datetime import datetime
 from .analyzer import SolidityAnalyzer, AnalysisResult, CodeMatch
 from .api_client import SoloditAPIClient, Finding, SearchResult, create_client
 from .patterns import Severity
+from .semantic_validator import SemanticValidator, ValidationContext, ValidationResult, create_validator
 
 
 @dataclass
@@ -24,6 +26,8 @@ class PotentialVulnerability:
     related_findings: List[Finding]
     confidence: str  # "HIGH", "MEDIUM", "LOW"
     recommendation: str
+    validation_result: Optional[ValidationResult] = None
+    validation_reason: Optional[str] = None
     
     def format_for_display(self) -> str:
         """Format vulnerability for terminal display."""
@@ -390,6 +394,7 @@ class AuditReport:
 class SoloditAuditor:
     """
     Main auditor class that combines static analysis with Solodit intelligence.
+    Uses semantic validation to eliminate false positives.
     """
     
     # Recommendations for each vulnerability pattern
@@ -424,7 +429,8 @@ class SoloditAuditor:
         api_key: Optional[str] = None,
         include_medium: bool = True,
         enable_cache: bool = True,
-        min_quality: int = 3
+        min_quality: int = 3,
+        strict_validation: bool = True
     ):
         """
         Initialize the auditor.
@@ -434,11 +440,16 @@ class SoloditAuditor:
             include_medium: Whether to include MEDIUM severity findings
             enable_cache: Cache API results
             min_quality: Minimum quality score for findings
+            strict_validation: Use semantic validation to filter false positives
         """
         self.analyzer = SolidityAnalyzer(include_medium=include_medium)
         self.client = create_client(api_key=api_key, enable_cache=enable_cache)
         self.min_quality = min_quality
         self.include_medium = include_medium
+        self.strict_validation = strict_validation
+        self.validator = create_validator() if strict_validation else None
+        self.show_filtered = False  # Set via CLI to show filtered findings
+        self.filtered_findings = []  # Store filtered findings for reporting
     
     def audit_code(self, code: str, target_name: str = "code snippet") -> AuditReport:
         """
@@ -521,8 +532,16 @@ class SoloditAuditor:
         return report
     
     def _enrich_with_findings(self, analysis: AnalysisResult) -> List[PotentialVulnerability]:
-        """Query Solodit API to enrich code matches with real findings."""
+        """Query Solodit API to enrich code matches with real findings, filtering false positives."""
         vulnerabilities = []
+        
+        # Read full code if we have the file path (for semantic validation)
+        full_code = ""
+        if analysis.file_path:
+            try:
+                full_code = Path(analysis.file_path).read_text(encoding='utf-8')
+            except:
+                pass
         
         # Group matches by pattern to reduce API calls
         pattern_matches: Dict[str, List[CodeMatch]] = {}
@@ -557,12 +576,55 @@ class SoloditAuditor:
                 print(f"  ⚠️  API error for '{pattern_name}': {e}")
                 pattern_findings[pattern_name] = []
         
-        # Create vulnerability entries
+        # Create vulnerability entries with semantic validation
+        false_positive_count = 0
         for match in analysis.matches:
             findings = pattern_findings.get(match.pattern_name, [])
             
-            # Determine confidence based on findings
-            if len(findings) >= 3 and any(f.quality_score >= 4 for f in findings):
+            # Perform semantic validation if enabled
+            validation_result = None
+            validation_reason = None
+            
+            if self.strict_validation and self.validator:
+                # Create validation context
+                ctx = ValidationContext(
+                    line=match.line_content,
+                    line_number=match.line_number,
+                    context_before=match.context_before,
+                    context_after=match.context_after,
+                    function_name=match.function_name,
+                    contract_name=analysis.contract_names[0] if analysis.contract_names else None,
+                    solidity_version=None,  # Could be extracted
+                    full_code=full_code
+                )
+                
+                validation_result, validation_reason = self.validator.validate_finding(
+                    match.pattern_name, ctx
+                )
+                
+                # Skip false positives
+                if validation_result == ValidationResult.FALSE_POSITIVE:
+                    false_positive_count += 1
+                    # Track the filtered finding
+                    filtered_info = {
+                        'pattern': match.pattern_name,
+                        'file': analysis.file_path,
+                        'line': match.line_number,
+                        'function': match.function_name,
+                        'reason': validation_reason,
+                        'code': match.line_content.strip()
+                    }
+                    self.filtered_findings.append(filtered_info)
+                    
+                    if self.show_filtered:
+                        print(f"    🔇 Filtered: {match.pattern_name} at line {match.line_number}")
+                        print(f"       Reason: {validation_reason}")
+                    continue
+            
+            # Determine confidence based on findings and validation
+            if validation_result == ValidationResult.TRUE_POSITIVE:
+                confidence = "HIGH"
+            elif len(findings) >= 3 and any(f.quality_score >= 4 for f in findings):
                 confidence = "HIGH"
             elif len(findings) >= 1:
                 confidence = "MEDIUM"
@@ -578,10 +640,15 @@ class SoloditAuditor:
                 code_match=match,
                 related_findings=findings,
                 confidence=confidence,
-                recommendation=recommendation
+                recommendation=recommendation,
+                validation_result=validation_result,
+                validation_reason=validation_reason
             )
             
             vulnerabilities.append(vuln)
+        
+        if false_positive_count > 0:
+            print(f"  🛡️  Filtered {false_positive_count} false positives via semantic validation")
         
         return vulnerabilities
     
@@ -612,7 +679,8 @@ class SoloditAuditor:
 def create_auditor(
     api_key: Optional[str] = None,
     include_medium: bool = True,
-    enable_cache: bool = True
+    enable_cache: bool = True,
+    strict_validation: bool = True
 ) -> SoloditAuditor:
     """
     Factory function to create an auditor instance.
@@ -621,6 +689,7 @@ def create_auditor(
         api_key: Solodit API key (or set SOLODIT_API_KEY env var)
         include_medium: Include MEDIUM severity findings
         enable_cache: Cache API results
+        strict_validation: Use semantic validation to filter false positives (default: True)
         
     Returns:
         Configured SoloditAuditor
@@ -628,5 +697,6 @@ def create_auditor(
     return SoloditAuditor(
         api_key=api_key,
         include_medium=include_medium,
-        enable_cache=enable_cache
+        enable_cache=enable_cache,
+        strict_validation=strict_validation
     )
