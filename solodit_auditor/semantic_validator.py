@@ -41,7 +41,37 @@ class SemanticValidator:
     - Loop bound analysis
     - Access control patterns
     - View/pure function safety
+    - Interface-only files
+    - Standard library patterns (OpenZeppelin)
+    - Self-delegatecall multicall patterns
     """
+    
+    # OpenZeppelin and other standard safe imports
+    SAFE_STANDARD_IMPORTS = [
+        r'@openzeppelin/contracts',
+        r'@openzeppelin/contracts-upgradeable',
+        r'ERC20Permit',
+        r'ERC2612',
+        r'draft-IERC20Permit',
+        r'solmate/src/tokens',
+        r'SafeERC20',
+        r'ReentrancyGuard',
+    ]
+    
+    # Standard interfaces from external protocols (not your implementation)
+    EXTERNAL_PROTOCOL_INTERFACES = [
+        r'IJoe',       # Trader Joe
+        r'IUniswap',   # Uniswap
+        r'ILB',        # Liquidity Book (Trader Joe V2)
+        r'IAave',      # Aave
+        r'ICompound',  # Compound
+        r'ICurve',     # Curve
+        r'ISushi',     # Sushiswap
+        r'IBalancer',  # Balancer
+        r'IGMX',       # GMX
+        r'IChainlink', # Chainlink
+        r'IYearn',     # Yearn
+    ]
     
     # Known safe proxy storage slots (EIP-1967 and common patterns)
     SAFE_PROXY_SLOTS = {
@@ -103,6 +133,19 @@ class SemanticValidator:
         Returns:
             Tuple of (ValidationResult, reason)
         """
+        # FIRST: Check for universal false positive conditions
+        
+        # Check if this is an interface-only file
+        is_interface, interface_reason = self._is_interface_only(ctx)
+        if is_interface:
+            return ValidationResult.FALSE_POSITIVE, interface_reason
+        
+        # Check for standard library usage (OpenZeppelin, etc.)
+        uses_stdlib, stdlib_reason = self._uses_standard_library(pattern_name, ctx)
+        if uses_stdlib:
+            return ValidationResult.FALSE_POSITIVE, stdlib_reason
+        
+        # Pattern-specific validators
         validators = {
             'reentrancy': self._validate_reentrancy,
             'delegatecall_injection': self._validate_delegatecall,
@@ -112,6 +155,9 @@ class SemanticValidator:
             'access_control': self._validate_access_control,
             'unsafe_erc20': self._validate_unsafe_erc20,
             'cross_chain': self._validate_cross_chain,
+            'signature_replay': self._validate_signature_replay,
+            'permit_dos': self._validate_permit_dos,
+            'flash_loan_vulnerability': self._validate_flash_loan,
         }
         
         validator = validators.get(pattern_name)
@@ -121,6 +167,83 @@ class SemanticValidator:
         # Default: needs manual review
         return ValidationResult.NEEDS_MANUAL_REVIEW, "No specific validator available"
     
+    def _is_interface_only(self, ctx: ValidationContext) -> Tuple[bool, str]:
+        """
+        Check if the code is from an interface-only file.
+        
+        Interface files contain no implementation, so vulnerabilities
+        flagged in them are always false positives.
+        """
+        full_code = ctx.full_code
+        line = ctx.line
+        
+        if not full_code:
+            # Check if line is just a function signature (interface pattern)
+            if re.match(r'\s*function\s+\w+\s*\([^)]*\)[^{]*;', line):
+                return True, "Interface function declaration - no implementation"
+            return False, ""
+        
+        # Check if file is primarily interface definitions
+        # Count interface vs contract definitions
+        interface_count = len(re.findall(r'\binterface\s+\w+', full_code))
+        contract_count = len(re.findall(r'\bcontract\s+\w+', full_code))
+        abstract_count = len(re.findall(r'\babstract\s+contract\s+\w+', full_code))
+        
+        # If only interfaces, it's an interface file
+        if interface_count > 0 and contract_count == 0:
+            return True, "Interface-only file - no implementation to audit"
+        
+        # Check for external protocol interface patterns
+        for pattern in self.EXTERNAL_PROTOCOL_INTERFACES:
+            if re.search(pattern, full_code):
+                # If the contract NAME starts with I (interface convention)
+                if ctx.contract_name and ctx.contract_name.startswith('I'):
+                    return True, f"External protocol interface ({ctx.contract_name}) - implementation is in external audited contract"
+        
+        # Check if the specific line is in an interface block
+        if re.search(r'\binterface\s+\w+[^{]*\{[^}]*' + re.escape(line.strip()[:30]), full_code, re.DOTALL):
+            return True, "Code is within interface definition"
+        
+        # Check for function declarations without bodies (interface style)
+        if re.match(r'\s*function\s+\w+\s*\([^)]*\)\s*(external|public)[^{]*;', line):
+            return True, "Interface function signature - no implementation"
+        
+        # Check for event declarations (often in interfaces)
+        if re.match(r'\s*event\s+\w+\s*\([^)]*\)\s*;', line):
+            return True, "Event declaration - no vulnerability in event definition"
+        
+        return False, ""
+    
+    def _uses_standard_library(self, pattern_name: str, ctx: ValidationContext) -> Tuple[bool, str]:
+        """
+        Check if the code uses standard libraries that handle the vulnerability.
+        
+        For example:
+        - OpenZeppelin ERC20Permit handles signature replay with nonces
+        - SafeERC20 handles unsafe token operations
+        - ReentrancyGuard handles reentrancy
+        """
+        full_code = ctx.full_code
+        full_context = self._get_full_context(ctx)
+        
+        # Check for OpenZeppelin imports
+        for import_pattern in self.SAFE_STANDARD_IMPORTS:
+            if re.search(import_pattern, full_code or full_context):
+                # Match specific patterns to specific vulnerabilities
+                if pattern_name == 'signature_replay' and 'ERC20Permit' in (full_code or full_context):
+                    return True, "Uses OpenZeppelin ERC20Permit - nonces, chainId, and EIP-712 are handled"
+                
+                if pattern_name == 'permit_dos' and 'ERC20Permit' in (full_code or full_context):
+                    return True, "Uses OpenZeppelin ERC20Permit - standard implementation"
+                
+                if pattern_name == 'unsafe_erc20' and 'SafeERC20' in (full_code or full_context):
+                    return True, "Uses OpenZeppelin SafeERC20"
+                    
+                if pattern_name == 'reentrancy' and 'ReentrancyGuard' in (full_code or full_context):
+                    return True, "Uses OpenZeppelin ReentrancyGuard"
+        
+        return False, ""
+
     def _validate_reentrancy(self, ctx: ValidationContext) -> Tuple[ValidationResult, str]:
         """
         Validate reentrancy finding.
@@ -211,9 +334,22 @@ class SemanticValidator:
         2. Using EIP-1967 storage slots
         3. Implementation is validated (zero address check)
         4. Standard proxy pattern (UUPS, Transparent)
+        5. Self-delegatecall (multicall pattern) - address(this).delegatecall()
         """
         full_context = self._get_full_context(ctx)
         line = ctx.line
+        
+        # Check 0: Self-delegatecall (multicall pattern)
+        # address(this).delegatecall() is safe - it only calls methods on itself
+        if re.search(r'address\s*\(\s*this\s*\)\s*\.\s*delegatecall', line):
+            # This is the standard multicall pattern (Uniswap, OpenZeppelin)
+            # Check if it's in a multicall function
+            if re.search(r'function\s+multicall', full_context, re.IGNORECASE) or \
+               re.search(r'BasicMulticall|Multicall', full_context):
+                return ValidationResult.FALSE_POSITIVE, "Self-delegatecall in multicall pattern - standard safe pattern (Uniswap/OZ style)"
+            
+            # Even without multicall name, self-delegatecall is generally safe
+            return ValidationResult.FALSE_POSITIVE, "Self-delegatecall (address(this).delegatecall) - only calls own methods"
         
         # Check 1: Is this in a constructor?
         if re.search(r'constructor\s*\([^)]*\)\s*\{', full_context):
@@ -467,6 +603,144 @@ class SemanticValidator:
                 return ValidationResult.FALSE_POSITIVE, "Sender/source is validated"
         
         return ValidationResult.NEEDS_MANUAL_REVIEW, "Cross-chain message should validate source"
+    
+    def _validate_signature_replay(self, ctx: ValidationContext) -> Tuple[ValidationResult, str]:
+        """
+        Validate signature replay vulnerability finding.
+        
+        False positive if:
+        1. Using OpenZeppelin ERC20Permit (has nonces)
+        2. Contract has nonces mapping
+        3. DOMAIN_SEPARATOR includes chainId
+        4. EIP-712 typed data is used
+        5. It's just an interface definition
+        """
+        full_context = self._get_full_context(ctx)
+        line = ctx.line
+        
+        # Check if it's an interface definition
+        if re.match(r'\s*function\s+\w+\s*\([^)]*\)[^{]*;', line):
+            return ValidationResult.FALSE_POSITIVE, "Interface function declaration - implementation handles replay protection"
+        
+        # Check for OpenZeppelin ERC20Permit
+        if re.search(r'ERC20Permit|ERC2612|IERC20Permit', full_context):
+            return ValidationResult.FALSE_POSITIVE, "Uses ERC20Permit standard - nonces and EIP-712 are implemented"
+        
+        # Check for nonces
+        nonce_patterns = [
+            r'\bnonces?\s*\[',
+            r'\bnonces?\s*\(',
+            r'mapping.*nonce',
+            r'_nonces',
+            r'_useNonce',
+            r'nonce\s*\+\+',
+            r'\+\+\s*nonce',
+        ]
+        for pattern in nonce_patterns:
+            if re.search(pattern, full_context, re.IGNORECASE):
+                return ValidationResult.FALSE_POSITIVE, "Nonces are used for replay protection"
+        
+        # Check for DOMAIN_SEPARATOR with chain ID
+        if re.search(r'DOMAIN_SEPARATOR', full_context):
+            if re.search(r'chainId|chain\.id|block\.chainid', full_context, re.IGNORECASE):
+                return ValidationResult.FALSE_POSITIVE, "DOMAIN_SEPARATOR includes chainId"
+        
+        # Check for EIP-712 
+        if re.search(r'EIP712|EIP-712|_domainSeparatorV4|_hashTypedDataV4', full_context):
+            return ValidationResult.FALSE_POSITIVE, "Uses EIP-712 typed data structure"
+        
+        # Check for constructor inheriting permit functionality
+        if re.search(r'constructor[^{]*ERC20Permit\s*\(', full_context):
+            return ValidationResult.FALSE_POSITIVE, "Inherits ERC20Permit - replay protection built-in"
+        
+        return ValidationResult.NEEDS_MANUAL_REVIEW, "Verify signature includes nonce, chainId, and contract address"
+    
+    def _validate_permit_dos(self, ctx: ValidationContext) -> Tuple[ValidationResult, str]:
+        """
+        Validate permit DoS vulnerability finding.
+        
+        False positive if:
+        1. It's an interface definition (not implementation)
+        2. Uses OpenZeppelin ERC20Permit (standard implementation)
+        3. Has fallback to regular approve
+        4. Is a nonces() view function (not vulnerable)
+        """
+        full_context = self._get_full_context(ctx)
+        line = ctx.line
+        
+        # Check if it's an interface definition
+        if re.match(r'\s*function\s+\w+\s*\([^)]*\)[^{]*;', line):
+            return ValidationResult.FALSE_POSITIVE, "Interface function declaration - not an implementation"
+        
+        # Check for nonces view function (not a vulnerability)
+        if re.search(r'function\s+nonces?\s*\(.*\)\s*(external|public)?\s*view', line):
+            return ValidationResult.FALSE_POSITIVE, "nonces() is a standard view function - not vulnerable"
+        
+        # Check for OpenZeppelin ERC20Permit
+        if re.search(r'ERC20Permit|@openzeppelin.*Permit', full_context):
+            return ValidationResult.FALSE_POSITIVE, "Uses OpenZeppelin ERC20Permit - standard implementation"
+        
+        # Check for try/catch around permit (handles failures)
+        if re.search(r'try\s+.*permit\s*\(', full_context):
+            return ValidationResult.FALSE_POSITIVE, "Permit call wrapped in try/catch"
+        
+        # Check for fallback to approve
+        if re.search(r'(permit|Permit).*\|\|.*(approve|Approve)', full_context) or \
+           re.search(r'(approve|Approve).*\|\|.*(permit|Permit)', full_context):
+            return ValidationResult.FALSE_POSITIVE, "Has fallback to regular approve"
+        
+        # Check if it's external protocol interface
+        if ctx.contract_name and ctx.contract_name.startswith('I'):
+            return ValidationResult.FALSE_POSITIVE, f"External protocol interface ({ctx.contract_name})"
+        
+        return ValidationResult.NEEDS_MANUAL_REVIEW, "Verify permit has fallback mechanism"
+    
+    def _validate_flash_loan(self, ctx: ValidationContext) -> Tuple[ValidationResult, str]:
+        """
+        Validate flash loan vulnerability finding.
+        
+        False positive if:
+        1. It's an interface definition or event
+        2. It's an external protocol interface (Aave, Balancer, etc.)
+        3. The contract has reentrancy protection
+        4. State consistency checks are present
+        """
+        full_context = self._get_full_context(ctx)
+        line = ctx.line
+        
+        # Check if it's an event declaration
+        if re.match(r'\s*event\s+\w+', line):
+            return ValidationResult.FALSE_POSITIVE, "Event declaration - not a vulnerability"
+        
+        # Check if it's an interface definition
+        if re.match(r'\s*function\s+\w+\s*\([^)]*\)[^{]*;', line):
+            return ValidationResult.FALSE_POSITIVE, "Interface function declaration - implementation handles flash loan safety"
+        
+        # Check if it's external protocol interface
+        for pattern in self.EXTERNAL_PROTOCOL_INTERFACES:
+            if re.search(pattern, ctx.contract_name or ''):
+                return ValidationResult.FALSE_POSITIVE, f"External protocol interface - flash loan security is in the external contract"
+        
+        # Check interface naming convention
+        if ctx.contract_name and ctx.contract_name.startswith('I') and ctx.contract_name[1].isupper():
+            return ValidationResult.FALSE_POSITIVE, f"External protocol interface ({ctx.contract_name}) - not your implementation"
+        
+        # Check for reentrancy guards in flash loan context
+        if re.search(r'nonReentrant|ReentrancyGuard|_locked', full_context):
+            return ValidationResult.FALSE_POSITIVE, "Flash loan callback has reentrancy protection"
+        
+        # Check for state consistency checks
+        consistency_patterns = [
+            r'require.*balance.*>=',
+            r'require.*==.*before',
+            r'invariant',
+            r'_checkInvariant',
+        ]
+        for pattern in consistency_patterns:
+            if re.search(pattern, full_context, re.IGNORECASE):
+                return ValidationResult.FALSE_POSITIVE, "State consistency checks present"
+        
+        return ValidationResult.NEEDS_MANUAL_REVIEW, "Verify flash loan callback has proper state validation"
     
     def _get_full_context(self, ctx: ValidationContext) -> str:
         """Get full context as a single string, including full_code if available."""
