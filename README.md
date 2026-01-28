@@ -1,4 +1,4 @@
-# 🛡️ Solodit Auditor
+# 🛡️ Fjor Auditor
 
 **Smart Contract Security Auditor powered by Cyfrin Solodit API**
 
@@ -53,6 +53,9 @@ solodit-auditor audit contracts/ --api-key "your_key"
 ```bash
 # Audit a single file
 solodit-auditor audit contracts/Vault.sol
+
+# Audit the In-Scope folder
+solodit-auditor audit ./contracts
 
 # Audit entire directory
 solodit-auditor audit ./contracts --output-md report.md
